@@ -837,6 +837,43 @@ impl DTerminalApp {
         }
     }
 
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        let paths: Vec<std::path::PathBuf> = dropped.iter().map(|f| f.path().to_path_buf()).collect();
+        let Some(i) = self.active_tab else {
+            return;
+        };
+        let is_tftp = matches!(&self.tabs[i], Tab::Ssh(t) if t.transfer_protocol == "tftp");
+        if is_tftp {
+            if let (Some(tab), Some(first)) = (self.tabs[i].as_ssh_mut(), paths.first()) {
+                tab.tftp.open = true;
+                if tab.tftp.remote_file_name.is_empty() {
+                    if let Some(name) = first.file_name() {
+                        tab.tftp.remote_file_name = name.to_string_lossy().to_string();
+                    }
+                }
+                tab.tftp.local_path = Some(first.clone());
+            }
+            return;
+        }
+        if !matches!(self.tabs[i], Tab::Ssh(_)) {
+            return;
+        }
+        let already_open = self.tabs[i].as_ssh_mut().map(|t| t.sftp.open).unwrap_or(true);
+        if !already_open {
+            self.toggle_sftp_panel(i);
+        }
+        if let Some(tab) = self.tabs[i].as_ssh_mut() {
+            if let Some(b) = &tab.sftp.backend {
+                b.upload(paths, &tab.sftp.path.clone());
+                tab.sftp.status = "Uploading…".to_string();
+            }
+        }
+    }
+
     fn confirm_delete_cmd_ui(&mut self, ctx: &egui::Context) {
         let Some(pending) = &self.confirm_delete_cmd else {
             return;
@@ -1329,6 +1366,18 @@ impl eframe::App for DTerminalApp {
         self.confirm_delete_sftp_ui(&ctx);
         self.cmd_modal_ui(&ctx);
         self.confirm_delete_cmd_ui(&ctx);
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.session_modal = None;
+            self.settings_modal = None;
+            self.confirm_delete = None;
+            self.mkdir_modal = None;
+            self.confirm_delete_sftp = None;
+            self.cmd_modal = None;
+            self.confirm_delete_cmd = None;
+        }
+
+        self.handle_dropped_files(&ctx);
 
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }

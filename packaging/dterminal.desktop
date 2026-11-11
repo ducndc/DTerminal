@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DTerminal
+Comment=Xshell-style SSH terminal client
+Exec=__HOME__/.local/bin/dterminal
+Icon=utilities-terminal
+Terminal=false
+Categories=Network;TerminalEmulator;
+StartupWMClass=DTerminal

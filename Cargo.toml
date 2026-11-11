@@ -2,6 +2,13 @@
 name = "dterminal"
 version = "0.1.0"
 edition = "2024"
+description = "Xshell-style SSH terminal client for Linux"
+license = "MIT"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
 
 [dependencies]
 aes-gcm = { version = "0.11.1", features = ["rand_core", "aes"] }
