@@ -37,6 +37,24 @@ pub fn show(
         response.request_focus();
     }
     let focused = response.has_focus();
+    if focused {
+        // Tab/arrows/Escape are normally reserved for egui's own
+        // focus-navigation between widgets ("press Tab, focus jumps to the
+        // next button"). A terminal needs to own all of them itself — Tab
+        // for completion, arrows for history/cursor movement, Escape for
+        // apps like vim — so claim them while this widget has focus.
+        ctx.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                id,
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            );
+        });
+    }
 
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, palette.background);
