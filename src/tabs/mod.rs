@@ -2,6 +2,33 @@ use crate::backend::local::{LocalEvent, LocalTerminal};
 use crate::backend::sftp::{SftpBackend, SftpEntry, SftpEvent};
 use crate::backend::ssh::{SshEvent, SshTerminal};
 use crate::term::TerminalSurface;
+use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
+
+pub enum TftpResult {
+    Upload(Result<u64, String>),
+    Download(Result<(PathBuf, u64), String>),
+}
+
+pub struct TftpPanel {
+    pub open: bool,
+    pub local_path: Option<PathBuf>,
+    pub remote_file_name: String,
+    pub status: String,
+    pub pending: Option<Receiver<TftpResult>>,
+}
+
+impl Default for TftpPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            local_path: None,
+            remote_file_name: String::new(),
+            status: String::new(),
+            pending: None,
+        }
+    }
+}
 
 pub struct SftpPanel {
     pub open: bool,
@@ -46,11 +73,15 @@ pub struct SshTab {
     pub host: String,
     pub port: u16,
     pub username: String,
+    /// "sftp" | "scp" | "tftp" — picks which transfer panel the toolbar shows.
+    pub transfer_protocol: String,
+    pub tftp_port: u16,
     pub surface: TerminalSurface,
     pub backend: SshTerminal,
     pub state: SshState,
     pub just_created: bool,
     pub sftp: SftpPanel,
+    pub tftp: TftpPanel,
 }
 
 pub enum Tab {
@@ -171,6 +202,31 @@ impl Tab {
                     if connect_failed {
                         t.sftp.backend = None;
                     }
+                }
+                let mut clear_pending = false;
+                if let Some(rx) = &t.tftp.pending {
+                    match rx.try_recv() {
+                        Ok(TftpResult::Upload(Ok(bytes))) => {
+                            t.tftp.status = format!("Upload complete ({bytes} bytes).");
+                            clear_pending = true;
+                        }
+                        Ok(TftpResult::Upload(Err(e))) => {
+                            t.tftp.status = format!("Upload failed: {e}");
+                            clear_pending = true;
+                        }
+                        Ok(TftpResult::Download(Ok((path, bytes)))) => {
+                            t.tftp.status = format!("Saved to {} ({bytes} bytes).", path.display());
+                            clear_pending = true;
+                        }
+                        Ok(TftpResult::Download(Err(e))) => {
+                            t.tftp.status = format!("Download failed: {e}");
+                            clear_pending = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
+                if clear_pending {
+                    t.tftp.pending = None;
                 }
             }
         }

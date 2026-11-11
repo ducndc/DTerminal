@@ -1030,6 +1030,7 @@ dependencies = [
  "getrandom 0.4.3",
  "keyring",
  "portable-pty",
+ "regex",
  "rfd",
  "serde",
  "serde_json",

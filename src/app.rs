@@ -1,11 +1,13 @@
 use crate::backend::local::LocalTerminal;
-use crate::backend::sftp::SftpBackend;
+use crate::backend::sftp::{Protocol, SftpBackend};
 use crate::backend::ssh::{SshConfig, SshTerminal};
+use crate::backend::tftp;
 use crate::config::{Appearance, Session, Store};
-use crate::tabs::{LocalTab, SftpPanel, SshState, SshTab, Tab};
+use crate::tabs::{LocalTab, SftpPanel, SshState, SshTab, Tab, TftpPanel, TftpResult};
 use crate::term::theme::Palette;
 use crate::term::{render, TerminalSurface};
 use alacritty_terminal::vte::ansi::CursorShape;
+use std::thread;
 
 fn ssh_config_for(session: &Session) -> SshConfig {
     SshConfig {
@@ -229,11 +231,14 @@ impl DTerminalApp {
             host: session.host.clone(),
             port: session.port,
             username: session.username.clone(),
+            transfer_protocol: session.transfer_protocol.clone(),
+            tftp_port: session.tftp_port,
             surface: TerminalSurface::new(80, 24, cursor_shape_from_str(&self.appearance.cursor_style)),
             backend,
             state: SshState::Connecting,
             just_created: true,
             sftp: SftpPanel::default(),
+            tftp: TftpPanel::default(),
         };
         self.tabs.push(Tab::Ssh(tab));
         self.active_tab = Some(self.tabs.len() - 1);
@@ -265,11 +270,69 @@ impl DTerminalApp {
             let Some(session) = self.store.get_session_with_secrets(&tab.session_id) else {
                 return;
             };
-            let backend = SftpBackend::connect(ssh_config_for(&session));
+            let protocol = if session.transfer_protocol == "scp" {
+                Protocol::Scp
+            } else {
+                Protocol::Sftp
+            };
+            let backend = SftpBackend::connect(ssh_config_for(&session), protocol);
             backend.list(&tab.sftp.path.clone());
             tab.sftp.backend = Some(backend);
             tab.sftp.status = "Loading…".to_string();
         }
+    }
+
+    fn toggle_tftp_panel(&mut self, index: usize) {
+        if let Some(tab) = self.tabs[index].as_ssh_mut() {
+            tab.tftp.open = !tab.tftp.open;
+        }
+    }
+
+    fn start_tftp_upload(&mut self, index: usize) {
+        let Some(tab) = self.tabs[index].as_ssh_mut() else {
+            return;
+        };
+        let Some(local_path) = tab.tftp.local_path.clone() else {
+            tab.tftp.status = "Choose a local file and enter a remote filename.".to_string();
+            return;
+        };
+        let remote_file_name = tab.tftp.remote_file_name.trim().to_string();
+        if remote_file_name.is_empty() {
+            tab.tftp.status = "Choose a local file and enter a remote filename.".to_string();
+            return;
+        }
+        let host = tab.host.clone();
+        let port = tab.tftp_port;
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let result = tftp::upload(&host, port, &local_path, &remote_file_name);
+            let _ = tx.send(TftpResult::Upload(result));
+        });
+        tab.tftp.pending = Some(rx);
+        tab.tftp.status = "Uploading via TFTP…".to_string();
+    }
+
+    fn start_tftp_download(&mut self, index: usize) {
+        let Some(tab) = self.tabs[index].as_ssh_mut() else {
+            return;
+        };
+        let remote_file_name = tab.tftp.remote_file_name.trim().to_string();
+        if remote_file_name.is_empty() {
+            tab.tftp.status = "Enter the remote filename to fetch.".to_string();
+            return;
+        }
+        let Some(dir) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let host = tab.host.clone();
+        let port = tab.tftp_port;
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let result = tftp::download(&host, port, &remote_file_name, &dir);
+            let _ = tx.send(TftpResult::Download(result));
+        });
+        tab.tftp.pending = Some(rx);
+        tab.tftp.status = "Downloading via TFTP…".to_string();
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -825,8 +888,8 @@ impl eframe::App for DTerminalApp {
         }
 
         let mut sftp_toggle: Option<usize> = None;
+        let mut tftp_toggle: Option<usize> = None;
         if let Some(i) = self.active_tab {
-            let is_ssh = matches!(self.tabs[i], Tab::Ssh(_));
             egui::Panel::top("term_toolbar").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     match &self.tabs[i] {
@@ -838,10 +901,23 @@ impl eframe::App for DTerminalApp {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if is_ssh {
-                            let open = self.tabs[i].as_ssh_mut().map(|t| t.sftp.open).unwrap_or(false);
-                            if ui.selectable_label(open, "SFTP").clicked() {
-                                sftp_toggle = Some(i);
+                        if let Tab::Ssh(t) = &self.tabs[i] {
+                            match t.transfer_protocol.as_str() {
+                                "tftp" => {
+                                    if ui.selectable_label(t.tftp.open, "TFTP").clicked() {
+                                        tftp_toggle = Some(i);
+                                    }
+                                }
+                                "scp" => {
+                                    if ui.selectable_label(t.sftp.open, "SCP").clicked() {
+                                        sftp_toggle = Some(i);
+                                    }
+                                }
+                                _ => {
+                                    if ui.selectable_label(t.sftp.open, "SFTP").clicked() {
+                                        sftp_toggle = Some(i);
+                                    }
+                                }
                             }
                         }
                     });
@@ -850,6 +926,9 @@ impl eframe::App for DTerminalApp {
         }
         if let Some(i) = sftp_toggle {
             self.toggle_sftp_panel(i);
+        }
+        if let Some(i) = tftp_toggle {
+            self.toggle_tftp_panel(i);
         }
 
         let mut sftp_action: Option<SftpAction> = None;
@@ -942,6 +1021,65 @@ impl eframe::App for DTerminalApp {
         }
         if let (Some(i), Some(action)) = (self.active_tab, sftp_action) {
             self.apply_sftp_action(i, action);
+        }
+
+        let mut tftp_browse: Option<usize> = None;
+        let mut tftp_upload: Option<usize> = None;
+        let mut tftp_download: Option<usize> = None;
+        if let Some(i) = self.active_tab {
+            let tftp_open = matches!(&self.tabs[i], Tab::Ssh(t) if t.tftp.open);
+            if tftp_open {
+                egui::Panel::right("tftp_panel")
+                    .resizable(true)
+                    .default_size(320.0)
+                    .show(ui, |ui| {
+                        let Tab::Ssh(tab) = &mut self.tabs[i] else { return };
+                        ui.heading("TFTP Transfer");
+                        ui.separator();
+                        ui.label("Local file");
+                        ui.horizontal(|ui| {
+                            let label = tab
+                                .tftp
+                                .local_path
+                                .as_ref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "No file selected".to_string());
+                            ui.label(label);
+                            if ui.button("Browse…").clicked() {
+                                tftp_browse = Some(i);
+                            }
+                        });
+                        ui.label("Remote filename");
+                        ui.text_edit_singleline(&mut tab.tftp.remote_file_name);
+                        ui.add_space(8.0);
+                        if ui.button("⬆ Upload to device").clicked() {
+                            tftp_upload = Some(i);
+                        }
+                        if ui.button("⬇ Download from device").clicked() {
+                            tftp_download = Some(i);
+                        }
+                        ui.separator();
+                        ui.label(&tab.tftp.status);
+                    });
+            }
+        }
+        if let Some(i) = tftp_browse {
+            if let Some(file) = rfd::FileDialog::new().pick_file() {
+                if let Some(tab) = self.tabs[i].as_ssh_mut() {
+                    if tab.tftp.remote_file_name.is_empty() {
+                        if let Some(name) = file.file_name() {
+                            tab.tftp.remote_file_name = name.to_string_lossy().to_string();
+                        }
+                    }
+                    tab.tftp.local_path = Some(file);
+                }
+            }
+        }
+        if let Some(i) = tftp_upload {
+            self.start_tftp_upload(i);
+        }
+        if let Some(i) = tftp_download {
+            self.start_tftp_download(i);
         }
 
         let mut reconnect_requested: Option<usize> = None;
