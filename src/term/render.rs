@@ -33,7 +33,7 @@ pub fn show(
     let available = ui.available_size();
     let rect = Rect::from_min_size(ui.cursor().min, available);
     let response = ui.interact(rect, id, Sense::click());
-    if focus_now {
+    if focus_now || response.clicked() {
         response.request_focus();
     }
     let focused = response.has_focus();
