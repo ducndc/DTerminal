@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+<title>DTerminal</title>
+<link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <span class="brand">DTerminal</span>
+        <div class="sidebar-header-actions">
+          <button id="newLocalBtn" title="New local terminal">⌨</button>
+          <button id="newSessionBtn" title="New session">+</button>
+        </div>
+      </div>
+      <div id="sessionList" class="session-list"></div>
+      <div class="sidebar-footer">
+        <button id="settingsBtn" title="Appearance settings">⚙ Settings</button>
+      </div>
+    </aside>
+
+    <main id="main">
+      <div class="tab-row">
+        <div id="tabBar" class="tab-bar"></div>
+        <div class="tab-row-actions">
+          <button id="cmdPanelToggle" title="Quick Commands">⌘ Commands</button>
+        </div>
+      </div>
+      <div class="main-body">
+        <div id="panes" class="panes"></div>
+        <aside id="cmdPanel" class="cmd-panel">
+          <div class="cmd-panel-header">
+            <span>Quick Commands</span>
+            <button id="cmdAddBtn" title="Add command">+</button>
+          </div>
+          <div id="cmdList" class="cmd-list"></div>
+        </aside>
+      </div>
+    </main>
+  </div>
+
+  <!-- Quick command editor modal -->
+  <div id="cmdModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="cmdModalTitle">New Command</h2>
+      <label>Name<input id="c_name" type="text" placeholder="Restart service" /></label>
+      <label>Command<textarea id="c_command" rows="4" placeholder="sudo systemctl restart myapp"></textarea></label>
+      <label class="checkbox-row"><input id="c_runEnter" type="checkbox" checked /> Press Enter after sending</label>
+      <div class="modal-actions">
+        <button id="cmdCancelBtn" class="secondary">Cancel</button>
+        <button id="cmdSaveBtn" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session editor modal -->
+  <div id="sessionModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="sessionModalTitle">New Session</h2>
+      <label>Name<input id="f_name" type="text" placeholder="My Server" /></label>
+      <div class="row">
+        <label class="grow">Host<input id="f_host" type="text" placeholder="192.168.1.10" /></label>
+        <label class="port">Port<input id="f_port" type="number" value="22" /></label>
+      </div>
+      <label>Username<input id="f_username" type="text" placeholder="root" /></label>
+
+      <label>File Transfer Protocol
+        <select id="f_transferProtocol">
+          <option value="sftp">SFTP (default)</option>
+          <option value="scp">SCP (no SFTP subsystem)</option>
+          <option value="tftp">TFTP (no auth, UDP)</option>
+        </select>
+      </label>
+      <div id="tftpPortRow" class="row hidden">
+        <label class="grow">TFTP Port<input id="f_tftpPort" type="number" value="69" /></label>
+      </div>
+
+      <div class="auth-tabs">
+        <button type="button" class="auth-tab active" data-auth="password">Password</button>
+        <button type="button" class="auth-tab" data-auth="key">Private Key</button>
+      </div>
+
+      <div id="authPassword" class="auth-panel">
+        <label>Password<input id="f_password" type="password" placeholder="(leave blank to keep existing)" /></label>
+      </div>
+      <div id="authKey" class="auth-panel hidden">
+        <label>Private key file
+          <div class="row">
+            <input id="f_keyPath" type="text" readonly placeholder="No file selected" class="grow" />
+            <button id="browseKeyBtn" type="button">Browse…</button>
+          </div>
+        </label>
+        <label>Passphrase (optional)<input id="f_passphrase" type="password" /></label>
+      </div>
+
+      <div class="modal-actions">
+        <button id="sessionCancelBtn" class="secondary">Cancel</button>
+        <button id="sessionSaveBtn" class="secondary">Save</button>
+        <button id="sessionSaveConnectBtn" class="primary">Save &amp; Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settingsModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Appearance</h2>
+      <label>Theme
+        <select id="s_theme">
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+          <option value="solarizedDark">Solarized Dark</option>
+          <option value="monokai">Monokai</option>
+          <option value="dracula">Dracula</option>
+        </select>
+      </label>
+      <label>Font family<input id="s_fontFamily" type="text" /></label>
+      <label>Font size<input id="s_fontSize" type="number" min="8" max="32" /></label>
+      <label>Cursor style
+        <select id="s_cursorStyle">
+          <option value="block">Block</option>
+          <option value="bar">Bar</option>
+          <option value="underline">Underline</option>
+        </select>
+      </label>
+      <div class="modal-actions">
+        <button id="settingsCancelBtn" class="secondary">Cancel</button>
+        <button id="settingsSaveBtn" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm dialog -->
+  <div id="confirmModal" class="modal-overlay hidden">
+    <div class="modal small">
+      <p id="confirmMessage">Are you sure?</p>
+      <div class="modal-actions">
+        <button id="confirmCancelBtn" class="secondary">Cancel</button>
+        <button id="confirmOkBtn" class="danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="themes.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
