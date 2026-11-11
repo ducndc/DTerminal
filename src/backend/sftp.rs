@@ -199,7 +199,7 @@ fn scp_download_one(sess: &Session, remote_path: &str, local_path: &Path) -> Res
 }
 
 impl SftpBackend {
-    pub fn connect(config: SshConfig, protocol: Protocol) -> Self {
+    pub fn connect(config: SshConfig, protocol: Protocol, ctx: egui::Context) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<SftpCommand>();
         let (event_tx, event_rx) = mpsc::channel::<SftpEvent>();
 
@@ -208,6 +208,7 @@ impl SftpBackend {
                 Ok(s) => s,
                 Err(msg) => {
                     let _ = event_tx.send(SftpEvent::ConnectError(msg));
+                    ctx.request_repaint();
                     return;
                 }
             };
@@ -216,6 +217,7 @@ impl SftpBackend {
                     Ok(s) => Some(s),
                     Err(e) => {
                         let _ = event_tx.send(SftpEvent::ConnectError(e.to_string()));
+                        ctx.request_repaint();
                         return;
                     }
                 }
@@ -333,6 +335,7 @@ impl SftpBackend {
                         }
                     }
                 }
+                ctx.request_repaint();
             }
         });
 

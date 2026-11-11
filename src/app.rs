@@ -185,6 +185,10 @@ pub struct DTerminalApp {
     palette: Palette,
     quick_commands: Vec<QuickCommand>,
     cmd_panel_open: bool,
+    /// Set at the top of every `ui()` call so background-thread backends can
+    /// be handed a repaint handle without threading `ctx` through every
+    /// helper method's signature.
+    ctx: Option<egui::Context>,
 
     tabs: Vec<Tab>,
     active_tab: Option<usize>,
@@ -213,6 +217,7 @@ impl Default for DTerminalApp {
             palette,
             quick_commands,
             cmd_panel_open: false,
+            ctx: None,
             tabs: Vec::new(),
             active_tab: None,
             tab_seq: 0,
@@ -236,9 +241,13 @@ fn cursor_shape_from_str(s: &str) -> CursorShape {
 }
 
 impl DTerminalApp {
+    fn ctx(&self) -> egui::Context {
+        self.ctx.clone().expect("ctx is set on the first ui() call")
+    }
+
     fn open_local_tab(&mut self) {
         self.tab_seq += 1;
-        match LocalTerminal::spawn(80, 24) {
+        match LocalTerminal::spawn(80, 24, self.ctx()) {
             Ok(backend) => {
                 let tab = LocalTab {
                     title: format!("Local Terminal {}", self.tab_seq),
@@ -265,7 +274,7 @@ impl DTerminalApp {
             return;
         };
         let config = ssh_config_for(&session);
-        let backend = SshTerminal::connect(config);
+        let backend = SshTerminal::connect(config, self.ctx());
         let tab = SshTab {
             title: session.name.clone(),
             session_id: session.id.clone(),
@@ -293,7 +302,7 @@ impl DTerminalApp {
             return;
         };
         let config = ssh_config_for(&session);
-        let backend = SshTerminal::connect(config);
+        let backend = SshTerminal::connect(config, self.ctx());
         if let Tab::Ssh(tab) = &mut self.tabs[index] {
             tab.surface = TerminalSurface::new(80, 24, cursor_shape_from_str(&self.appearance.cursor_style));
             tab.backend = backend;
@@ -303,6 +312,7 @@ impl DTerminalApp {
     }
 
     fn toggle_sftp_panel(&mut self, index: usize) {
+        let ctx = self.ctx();
         let Some(tab) = self.tabs[index].as_ssh_mut() else {
             return;
         };
@@ -316,7 +326,7 @@ impl DTerminalApp {
             } else {
                 Protocol::Sftp
             };
-            let backend = SftpBackend::connect(ssh_config_for(&session), protocol);
+            let backend = SftpBackend::connect(ssh_config_for(&session), protocol, ctx);
             backend.list(&tab.sftp.path.clone());
             tab.sftp.backend = Some(backend);
             tab.sftp.status = "Loading…".to_string();
@@ -330,6 +340,7 @@ impl DTerminalApp {
     }
 
     fn start_tftp_upload(&mut self, index: usize) {
+        let ctx = self.ctx();
         let Some(tab) = self.tabs[index].as_ssh_mut() else {
             return;
         };
@@ -348,12 +359,14 @@ impl DTerminalApp {
         thread::spawn(move || {
             let result = tftp::upload(&host, port, &local_path, &remote_file_name);
             let _ = tx.send(TftpResult::Upload(result));
+            ctx.request_repaint();
         });
         tab.tftp.pending = Some(rx);
         tab.tftp.status = "Uploading via TFTP…".to_string();
     }
 
     fn start_tftp_download(&mut self, index: usize) {
+        let ctx = self.ctx();
         let Some(tab) = self.tabs[index].as_ssh_mut() else {
             return;
         };
@@ -371,6 +384,7 @@ impl DTerminalApp {
         thread::spawn(move || {
             let result = tftp::download(&host, port, &remote_file_name, &dir);
             let _ = tx.send(TftpResult::Download(result));
+            ctx.request_repaint();
         });
         tab.tftp.pending = Some(rx);
         tab.tftp.status = "Downloading via TFTP…".to_string();
@@ -966,6 +980,8 @@ fn rfd_pick_file() -> Option<String> {
 
 impl eframe::App for DTerminalApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.ctx = Some(ui.ctx().clone());
+
         egui::Panel::left("sidebar")
             .resizable(true)
             .default_size(240.0)
@@ -1379,6 +1395,10 @@ impl eframe::App for DTerminalApp {
 
         self.handle_dropped_files(&ctx);
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        // Backends call `ctx.request_repaint()` themselves as soon as new
+        // data/events are ready, so this is just a slow safety-net poll
+        // (e.g. in case a thread's repaint call races a frame boundary),
+        // not the primary way new output gets shown.
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 }

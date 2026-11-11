@@ -21,7 +21,7 @@ pub struct LocalTerminal {
 }
 
 impl LocalTerminal {
-    pub fn spawn(cols: usize, rows: usize) -> anyhow::Result<Self> {
+    pub fn spawn(cols: usize, rows: usize, ctx: egui::Context) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
         let size = PtySize {
             rows: rows.max(1) as u16,
@@ -50,15 +50,18 @@ impl LocalTerminal {
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         let _ = tx.send(LocalEvent::Exited);
+                        ctx.request_repaint();
                         break;
                     }
                     Ok(n) => {
                         if tx.send(LocalEvent::Data(buf[..n].to_vec())).is_err() {
                             break;
                         }
+                        ctx.request_repaint();
                     }
                     Err(_) => {
                         let _ = tx.send(LocalEvent::Exited);
+                        ctx.request_repaint();
                         break;
                     }
                 }

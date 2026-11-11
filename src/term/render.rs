@@ -2,6 +2,7 @@ use super::theme::Palette;
 use super::TerminalSurface;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::CursorShape;
+use egui::text::{ByteIndex, LayoutJob, LayoutSection, TextFormat};
 use egui::{Color32, FontId, Key, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 /// What the UI layer should do after painting one frame of a terminal.
@@ -44,6 +45,11 @@ pub fn show(
     let cursor_point = content.cursor.point;
     let cursor_visible = !matches!(content.cursor.shape, CursorShape::Hidden);
 
+    // One `LayoutJob` (and thus one text-shaping call) per visible row,
+    // instead of one per glyph — shaping per character was the dominant
+    // cost and made typing/scrolling feel sluggish on a fairly full screen.
+    let mut row_job = RowJob::default();
+
     for indexed in content.display_iter {
         let line = indexed.point.line.0;
         if line < 0 {
@@ -51,11 +57,6 @@ pub fn show(
         }
         let (row, col) = (line as usize, indexed.point.column.0);
         let cell = indexed.cell;
-        if cell.c == ' ' && cell.bg == alacritty_terminal::vte::ansi::Color::Named(
-            alacritty_terminal::vte::ansi::NamedColor::Background,
-        ) {
-            continue;
-        }
 
         let mut fg = palette.resolve(cell.fg);
         let mut bg = palette.resolve(cell.bg);
@@ -73,15 +74,12 @@ pub fn show(
             painter.rect_filled(cell_rect, 0.0, bg);
         }
 
-        if cell.c != ' ' && cell.c != '\0' {
-            painter.text(
-                cell_min,
-                egui::Align2::LEFT_TOP,
-                cell.c,
-                font_id.clone(),
-                fg,
-            );
+        if row_job.row != Some(row) {
+            row_job.flush(&painter, &ctx, rect.min, row_h, &font_id);
+            row_job.row = Some(row);
         }
+        let c = if cell.c == '\0' { ' ' } else { cell.c };
+        row_job.push(c, fg);
 
         if cell.flags.contains(Flags::UNDERLINE) {
             let y = cell_rect.max.y - 1.0;
@@ -98,6 +96,7 @@ pub fn show(
             );
         }
     }
+    row_job.flush(&painter, &ctx, rect.min, row_h, &font_id);
 
     if focused && cursor_visible && cursor_point.line.0 >= 0 {
         let row = cursor_point.line.0 as usize;
@@ -162,6 +161,69 @@ pub fn show(
     TermFrameResult {
         input_bytes,
         resize_to,
+    }
+}
+
+/// Accumulates one visible row's characters into a single `LayoutJob`,
+/// splitting into a new `LayoutSection` only when the foreground color
+/// changes, so a full row costs one text-shaping call instead of one per
+/// character.
+#[derive(Default)]
+struct RowJob {
+    row: Option<usize>,
+    text: String,
+    sections: Vec<LayoutSection>,
+    run_start: usize,
+    run_color: Option<Color32>,
+}
+
+impl RowJob {
+    fn push(&mut self, c: char, color: Color32) {
+        if self.run_color != Some(color) {
+            self.close_run();
+            self.run_color = Some(color);
+        }
+        self.text.push(c);
+    }
+
+    fn close_run(&mut self) {
+        if let Some(color) = self.run_color {
+            if self.text.len() > self.run_start {
+                self.sections.push(LayoutSection {
+                    leading_space: 0.0,
+                    byte_range: ByteIndex(self.run_start)..ByteIndex(self.text.len()),
+                    format: TextFormat {
+                        color,
+                        ..Default::default()
+                    },
+                });
+            }
+        }
+        self.run_start = self.text.len();
+    }
+
+    fn flush(&mut self, painter: &egui::Painter, ctx: &egui::Context, origin: egui::Pos2, row_h: f32, font_id: &FontId) {
+        self.close_run();
+        if !self.sections.is_empty() {
+            let mut sections = std::mem::take(&mut self.sections);
+            for section in &mut sections {
+                section.format.font_id = font_id.clone();
+            }
+            let job = LayoutJob {
+                text: std::mem::take(&mut self.text),
+                sections,
+                break_on_newline: false,
+                ..Default::default()
+            };
+            let row = self.row.unwrap_or(0);
+            let galley = ctx.fonts_mut(|f| f.layout_job(job));
+            let pos = origin + Vec2::new(0.0, row as f32 * row_h);
+            painter.galley(pos, galley, Color32::WHITE);
+        }
+        self.text.clear();
+        self.sections.clear();
+        self.run_start = 0;
+        self.run_color = None;
     }
 }
 

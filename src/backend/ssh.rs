@@ -104,7 +104,7 @@ fn connect_and_open_shell(config: &SshConfig) -> Result<(Session, ssh2::Channel)
 }
 
 impl SshTerminal {
-    pub fn connect(config: SshConfig) -> Self {
+    pub fn connect(config: SshConfig, ctx: egui::Context) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<SshCommand>();
         let (event_tx, event_rx) = mpsc::channel::<SshEvent>();
 
@@ -114,10 +114,12 @@ impl SshTerminal {
                 Err(msg) => {
                     let _ = event_tx.send(SshEvent::Error(msg));
                     let _ = event_tx.send(SshEvent::Closed);
+                    ctx.request_repaint();
                     return;
                 }
             };
             let _ = event_tx.send(SshEvent::Connected);
+            ctx.request_repaint();
             sess.set_blocking(false);
 
             let mut buf = [0u8; 8192];
@@ -144,6 +146,7 @@ impl SshTerminal {
                         Err(TryRecvError::Disconnected) => {
                             let _ = channel.close();
                             let _ = event_tx.send(SshEvent::Closed);
+                            ctx.request_repaint();
                             return;
                         }
                     }
@@ -153,6 +156,7 @@ impl SshTerminal {
                     Ok(0) => {
                         if channel.eof() {
                             let _ = event_tx.send(SshEvent::Closed);
+                            ctx.request_repaint();
                             return;
                         }
                     }
@@ -160,6 +164,7 @@ impl SshTerminal {
                         if event_tx.send(SshEvent::Data(buf[..n].to_vec())).is_err() {
                             return;
                         }
+                        ctx.request_repaint();
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(15));
@@ -167,6 +172,7 @@ impl SshTerminal {
                     Err(e) => {
                         let _ = event_tx.send(SshEvent::Error(e.to_string()));
                         let _ = event_tx.send(SshEvent::Closed);
+                        ctx.request_repaint();
                         return;
                     }
                 }
