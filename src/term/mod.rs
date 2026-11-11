@@ -4,7 +4,7 @@ pub mod theme;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, RenderableContent, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
 
 #[derive(Clone, Copy)]
 struct Size {
@@ -34,13 +34,20 @@ pub struct TerminalSurface {
 }
 
 impl TerminalSurface {
-    pub fn new(cols: usize, rows: usize) -> Self {
+    pub fn new(cols: usize, rows: usize, cursor_shape: CursorShape) -> Self {
         let size = Size {
             cols: cols.max(1),
             rows: rows.max(1),
             scrollback: 10_000,
         };
-        let term = Term::new(Config::default(), &size, VoidListener);
+        let config = Config {
+            default_cursor_style: CursorStyle {
+                shape: cursor_shape,
+                blinking: true,
+            },
+            ..Config::default()
+        };
+        let term = Term::new(config, &size, VoidListener);
         Self {
             term,
             parser: Processor::new(),

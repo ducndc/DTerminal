@@ -2,7 +2,7 @@ use super::theme::Palette;
 use super::TerminalSurface;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::CursorShape;
-use egui::{Color32, FontId, Key, Rect, Sense, Stroke, StrokeKind, TextStyle, Vec2};
+use egui::{Color32, FontId, Key, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 /// What the UI layer should do after painting one frame of a terminal.
 pub struct TermFrameResult {
@@ -18,9 +18,10 @@ pub fn show(
     id: egui::Id,
     surface: &TerminalSurface,
     palette: &Palette,
+    font_size: f32,
     focus_now: bool,
 ) -> TermFrameResult {
-    let font_id = FontId::monospace(ui.text_style_height(&TextStyle::Monospace).max(13.0));
+    let font_id = FontId::monospace(font_size.max(6.0));
     let ctx = ui.ctx().clone();
     let (char_w, row_h) = ctx.fonts_mut(|f| {
         let w = f.glyph_width(&font_id, 'M');

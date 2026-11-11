@@ -1,5 +1,7 @@
 mod app;
 mod backend;
+mod config;
+mod tabs;
 mod term;
 
 fn main() -> eframe::Result<()> {
