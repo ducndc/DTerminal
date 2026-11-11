@@ -13,6 +13,7 @@ pub enum SshEvent {
     Closed,
 }
 
+#[derive(Clone)]
 pub struct SshConfig {
     pub host: String,
     pub port: u16,
@@ -53,7 +54,11 @@ impl KeyboardInteractivePrompt for PasswordPrompter {
     }
 }
 
-fn connect_and_open_shell(config: &SshConfig) -> Result<(Session, ssh2::Channel), String> {
+/// Connects and authenticates, leaving the session in blocking mode —
+/// shared by the shell-channel backend here and the SFTP backend, which
+/// each open their own independent connection (libssh2 sessions aren't
+/// safe to share across threads).
+pub fn connect_session(config: &SshConfig) -> Result<Session, String> {
     let tcp = TcpStream::connect((config.host.as_str(), config.port)).map_err(|e| e.to_string())?;
     tcp.set_nodelay(true).ok();
 
@@ -80,6 +85,11 @@ fn connect_and_open_shell(config: &SshConfig) -> Result<(Session, ssh2::Channel)
         return Err("Authentication failed".to_string());
     }
 
+    Ok(sess)
+}
+
+fn connect_and_open_shell(config: &SshConfig) -> Result<(Session, ssh2::Channel), String> {
+    let sess = connect_session(config)?;
     let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
     channel
         .request_pty(

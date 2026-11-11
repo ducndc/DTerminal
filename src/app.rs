@@ -1,10 +1,25 @@
 use crate::backend::local::LocalTerminal;
+use crate::backend::sftp::SftpBackend;
 use crate::backend::ssh::{SshConfig, SshTerminal};
 use crate::config::{Appearance, Session, Store};
-use crate::tabs::{LocalTab, SshState, SshTab, Tab};
+use crate::tabs::{LocalTab, SftpPanel, SshState, SshTab, Tab};
 use crate::term::theme::Palette;
 use crate::term::{render, TerminalSurface};
 use alacritty_terminal::vte::ansi::CursorShape;
+
+fn ssh_config_for(session: &Session) -> SshConfig {
+    SshConfig {
+        host: session.host.clone(),
+        port: session.port,
+        username: session.username.clone(),
+        password: session.password.clone(),
+        key_path: session.key_path.clone(),
+        passphrase: session.passphrase.clone(),
+        use_key: session.auth_type == "key",
+        cols: 80,
+        rows: 24,
+    }
+}
 
 #[derive(PartialEq, Clone, Copy)]
 enum AuthType {
@@ -117,6 +132,18 @@ struct ConfirmDeleteSession {
     name: String,
 }
 
+struct ConfirmDeleteSftpEntry {
+    tab_index: usize,
+    path: String,
+    name: String,
+    is_dir: bool,
+}
+
+struct MkdirDraft {
+    tab_index: usize,
+    name: String,
+}
+
 pub struct DTerminalApp {
     store: Store,
     sessions: Vec<Session>,
@@ -130,6 +157,8 @@ pub struct DTerminalApp {
     session_modal: Option<SessionDraft>,
     settings_modal: Option<Appearance>,
     confirm_delete: Option<ConfirmDeleteSession>,
+    confirm_delete_sftp: Option<ConfirmDeleteSftpEntry>,
+    mkdir_modal: Option<MkdirDraft>,
 }
 
 impl Default for DTerminalApp {
@@ -149,6 +178,8 @@ impl Default for DTerminalApp {
             session_modal: None,
             settings_modal: None,
             confirm_delete: None,
+            confirm_delete_sftp: None,
+            mkdir_modal: None,
         }
     }
 }
@@ -190,25 +221,19 @@ impl DTerminalApp {
         let Some(session) = self.store.get_session_with_secrets(session_id) else {
             return;
         };
-        let config = SshConfig {
-            host: session.host.clone(),
-            port: session.port,
-            username: session.username.clone(),
-            password: session.password,
-            key_path: session.key_path,
-            passphrase: session.passphrase,
-            use_key: session.auth_type == "key",
-            cols: 80,
-            rows: 24,
-        };
+        let config = ssh_config_for(&session);
         let backend = SshTerminal::connect(config);
         let tab = SshTab {
             title: session.name.clone(),
             session_id: session.id.clone(),
+            host: session.host.clone(),
+            port: session.port,
+            username: session.username.clone(),
             surface: TerminalSurface::new(80, 24, cursor_shape_from_str(&self.appearance.cursor_style)),
             backend,
             state: SshState::Connecting,
             just_created: true,
+            sftp: SftpPanel::default(),
         };
         self.tabs.push(Tab::Ssh(tab));
         self.active_tab = Some(self.tabs.len() - 1);
@@ -221,23 +246,29 @@ impl DTerminalApp {
         let Some(session) = self.store.get_session_with_secrets(&tab.session_id) else {
             return;
         };
-        let config = SshConfig {
-            host: session.host.clone(),
-            port: session.port,
-            username: session.username.clone(),
-            password: session.password,
-            key_path: session.key_path,
-            passphrase: session.passphrase,
-            use_key: session.auth_type == "key",
-            cols: 80,
-            rows: 24,
-        };
+        let config = ssh_config_for(&session);
         let backend = SshTerminal::connect(config);
         if let Tab::Ssh(tab) = &mut self.tabs[index] {
             tab.surface = TerminalSurface::new(80, 24, cursor_shape_from_str(&self.appearance.cursor_style));
             tab.backend = backend;
             tab.state = SshState::Connecting;
             tab.just_created = true;
+        }
+    }
+
+    fn toggle_sftp_panel(&mut self, index: usize) {
+        let Some(tab) = self.tabs[index].as_ssh_mut() else {
+            return;
+        };
+        tab.sftp.open = !tab.sftp.open;
+        if tab.sftp.open && tab.sftp.backend.is_none() {
+            let Some(session) = self.store.get_session_with_secrets(&tab.session_id) else {
+                return;
+            };
+            let backend = SftpBackend::connect(ssh_config_for(&session));
+            backend.list(&tab.sftp.path.clone());
+            tab.sftp.backend = Some(backend);
+            tab.sftp.status = "Loading…".to_string();
         }
     }
 
@@ -461,6 +492,155 @@ impl DTerminalApp {
         }
     }
 
+    fn apply_sftp_action(&mut self, tab_index: usize, action: SftpAction) {
+        let Some(tab) = self.tabs[tab_index].as_ssh_mut() else {
+            return;
+        };
+        match action {
+            SftpAction::Refresh => {
+                if let Some(b) = &tab.sftp.backend {
+                    b.list(&tab.sftp.path.clone());
+                    tab.sftp.status = "Loading…".to_string();
+                }
+            }
+            SftpAction::Upload => {
+                if let Some(files) = rfd::FileDialog::new().pick_files() {
+                    if let Some(b) = &tab.sftp.backend {
+                        b.upload(files, &tab.sftp.path.clone());
+                        tab.sftp.status = "Uploading…".to_string();
+                    }
+                }
+            }
+            SftpAction::Download => {
+                let Some(idx) = tab.sftp.selected else {
+                    tab.sftp.status = "Select a file first.".to_string();
+                    return;
+                };
+                let Some(entry) = tab.sftp.entries.get(idx) else {
+                    return;
+                };
+                if entry.is_dir {
+                    tab.sftp.status = "Folder download not supported.".to_string();
+                    return;
+                }
+                let remote_path = join_path(&tab.sftp.path, &entry.name);
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    if let Some(b) = &tab.sftp.backend {
+                        b.download(vec![remote_path], dir);
+                        tab.sftp.status = "Downloading…".to_string();
+                    }
+                }
+            }
+            SftpAction::NewFolder => {
+                self.mkdir_modal = Some(MkdirDraft {
+                    tab_index,
+                    name: String::new(),
+                });
+            }
+            SftpAction::Delete => {
+                let Some(idx) = tab.sftp.selected else {
+                    tab.sftp.status = "Select an item first.".to_string();
+                    return;
+                };
+                let Some(entry) = tab.sftp.entries.get(idx) else {
+                    return;
+                };
+                self.confirm_delete_sftp = Some(ConfirmDeleteSftpEntry {
+                    tab_index,
+                    path: join_path(&tab.sftp.path, &entry.name),
+                    name: entry.name.clone(),
+                    is_dir: entry.is_dir,
+                });
+            }
+            SftpAction::Navigate(path) => {
+                tab.sftp.selected = None;
+                if let Some(b) = &tab.sftp.backend {
+                    b.list(&path);
+                    tab.sftp.status = "Loading…".to_string();
+                }
+            }
+            SftpAction::EnterDir(path) => {
+                tab.sftp.selected = None;
+                if let Some(b) = &tab.sftp.backend {
+                    b.list(&path);
+                    tab.sftp.status = "Loading…".to_string();
+                }
+            }
+            SftpAction::Select(idx) => {
+                tab.sftp.selected = Some(idx);
+            }
+        }
+    }
+
+    fn mkdir_modal_ui(&mut self, ctx: &egui::Context) {
+        let Some(draft) = &mut self.mkdir_modal else {
+            return;
+        };
+        let mut close = false;
+        let mut create = false;
+
+        egui::Modal::new(egui::Id::unique("mkdir_modal")).show(ctx, |ui| {
+            ui.set_min_width(260.0);
+            ui.label("New folder name:");
+            ui.text_edit_singleline(&mut draft.name);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                if ui.add_enabled(!draft.name.trim().is_empty(), egui::Button::new("Create")).clicked() {
+                    create = true;
+                }
+            });
+        });
+
+        if create {
+            if let Some(draft) = self.mkdir_modal.take() {
+                if let Some(tab) = self.tabs[draft.tab_index].as_ssh_mut() {
+                    let path = join_path(&tab.sftp.path, draft.name.trim());
+                    if let Some(b) = &tab.sftp.backend {
+                        b.mkdir(&path);
+                    }
+                }
+            }
+        } else if close {
+            self.mkdir_modal = None;
+        }
+    }
+
+    fn confirm_delete_sftp_ui(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.confirm_delete_sftp else {
+            return;
+        };
+        let mut delete = false;
+        let mut cancel = false;
+
+        egui::Modal::new(egui::Id::unique("confirm_delete_sftp")).show(ctx, |ui| {
+            ui.set_min_width(280.0);
+            ui.label(format!("Delete \"{}\"?", pending.name));
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                if ui.button("Delete").clicked() {
+                    delete = true;
+                }
+            });
+        });
+
+        if delete {
+            if let Some(pending) = self.confirm_delete_sftp.take() {
+                if let Some(tab) = self.tabs[pending.tab_index].as_ssh_mut() {
+                    if let Some(b) = &tab.sftp.backend {
+                        b.delete(&pending.path, pending.is_dir);
+                        tab.sftp.status = "Deleting…".to_string();
+                    }
+                }
+            }
+        } else if cancel {
+            self.confirm_delete_sftp = None;
+        }
+    }
+
     fn confirm_delete_ui(&mut self, ctx: &egui::Context) {
         let Some(pending) = &self.confirm_delete else {
             return;
@@ -489,6 +669,49 @@ impl DTerminalApp {
         } else if cancel {
             self.confirm_delete = None;
         }
+    }
+}
+
+enum SftpAction {
+    Refresh,
+    Upload,
+    Download,
+    NewFolder,
+    Delete,
+    Navigate(String),
+    Select(usize),
+    EnterDir(String),
+}
+
+fn join_path(dir: &str, name: &str) -> String {
+    if dir == "/" {
+        format!("/{name}")
+    } else if dir.ends_with('/') {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+fn parent_of(path: &str) -> String {
+    if path == "/" || path == "." {
+        return path.to_string();
+    }
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rsplit_once('/') {
+        Some(("", _)) => "/".to_string(),
+        Some((head, _)) => head.to_string(),
+        None => if path.starts_with('/') { "/".to_string() } else { ".".to_string() },
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
     }
 }
 
@@ -601,6 +824,126 @@ impl eframe::App for DTerminalApp {
             self.close_tab(i);
         }
 
+        let mut sftp_toggle: Option<usize> = None;
+        if let Some(i) = self.active_tab {
+            let is_ssh = matches!(self.tabs[i], Tab::Ssh(_));
+            egui::Panel::top("term_toolbar").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    match &self.tabs[i] {
+                        Tab::Ssh(t) => {
+                            ui.label(format!("{}@{}:{}", t.username, t.host, t.port));
+                        }
+                        Tab::Local(_) => {
+                            ui.label("Local Terminal");
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if is_ssh {
+                            let open = self.tabs[i].as_ssh_mut().map(|t| t.sftp.open).unwrap_or(false);
+                            if ui.selectable_label(open, "SFTP").clicked() {
+                                sftp_toggle = Some(i);
+                            }
+                        }
+                    });
+                });
+            });
+        }
+        if let Some(i) = sftp_toggle {
+            self.toggle_sftp_panel(i);
+        }
+
+        let mut sftp_action: Option<SftpAction> = None;
+        if let Some(i) = self.active_tab {
+            let sftp_open = matches!(&self.tabs[i], Tab::Ssh(t) if t.sftp.open);
+            if sftp_open {
+                egui::Panel::right("sftp_panel")
+                    .resizable(true)
+                    .default_size(340.0)
+                    .show(ui, |ui| {
+                        let Tab::Ssh(tab) = &self.tabs[i] else { return };
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.small_button("⟳ Refresh").clicked() {
+                                sftp_action = Some(SftpAction::Refresh);
+                            }
+                            if ui.small_button("⬆ Upload").clicked() {
+                                sftp_action = Some(SftpAction::Upload);
+                            }
+                            if ui.small_button("⬇ Download").clicked() {
+                                sftp_action = Some(SftpAction::Download);
+                            }
+                            if ui.small_button("+ Folder").clicked() {
+                                sftp_action = Some(SftpAction::NewFolder);
+                            }
+                            if ui.small_button("🗑 Delete").clicked() {
+                                sftp_action = Some(SftpAction::Delete);
+                            }
+                        });
+                        ui.separator();
+
+                        ui.horizontal_wrapped(|ui| {
+                            let is_abs = tab.sftp.path.starts_with('/');
+                            let root_label = if is_abs { "/" } else { "." };
+                            if ui.link(root_label).clicked() {
+                                sftp_action = Some(SftpAction::Navigate(root_label.to_string()));
+                            }
+                            let mut acc = String::new();
+                            for part in tab.sftp.path.split('/').filter(|p| !p.is_empty()) {
+                                ui.label("/");
+                                acc = if acc.is_empty() {
+                                    if is_abs {
+                                        format!("/{part}")
+                                    } else {
+                                        part.to_string()
+                                    }
+                                } else {
+                                    format!("{acc}/{part}")
+                                };
+                                if ui.link(part).clicked() {
+                                    sftp_action = Some(SftpAction::Navigate(acc.clone()));
+                                }
+                            }
+                        });
+                        ui.separator();
+
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            if tab.sftp.path != "." && tab.sftp.path != "/" {
+                                if ui.selectable_label(false, "📁 ..").double_clicked() {
+                                    sftp_action = Some(SftpAction::Navigate(parent_of(&tab.sftp.path)));
+                                }
+                            }
+                            for (idx, entry) in tab.sftp.entries.iter().enumerate() {
+                                let icon = if entry.is_dir {
+                                    "📁"
+                                } else if entry.is_symlink {
+                                    "🔗"
+                                } else {
+                                    "📄"
+                                };
+                                let size = if entry.is_dir {
+                                    String::new()
+                                } else {
+                                    format_size(entry.size)
+                                };
+                                let selected = tab.sftp.selected == Some(idx);
+                                let resp = ui.selectable_label(selected, format!("{icon} {}  {size}", entry.name));
+                                if resp.clicked() {
+                                    sftp_action = Some(SftpAction::Select(idx));
+                                }
+                                if resp.double_clicked() && entry.is_dir {
+                                    sftp_action =
+                                        Some(SftpAction::EnterDir(join_path(&tab.sftp.path, &entry.name)));
+                                }
+                            }
+                        });
+                        ui.separator();
+                        ui.label(&tab.sftp.status);
+                    });
+            }
+        }
+        if let (Some(i), Some(action)) = (self.active_tab, sftp_action) {
+            self.apply_sftp_action(i, action);
+        }
+
         let mut reconnect_requested: Option<usize> = None;
         egui::CentralPanel::default().show(ui, |ui| {
             let Some(i) = self.active_tab else {
@@ -653,6 +996,8 @@ impl eframe::App for DTerminalApp {
         self.session_modal_ui(&ctx);
         self.settings_modal_ui(&ctx);
         self.confirm_delete_ui(&ctx);
+        self.mkdir_modal_ui(&ctx);
+        self.confirm_delete_sftp_ui(&ctx);
 
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }

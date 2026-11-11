@@ -1,6 +1,29 @@
 use crate::backend::local::{LocalEvent, LocalTerminal};
+use crate::backend::sftp::{SftpBackend, SftpEntry, SftpEvent};
 use crate::backend::ssh::{SshEvent, SshTerminal};
 use crate::term::TerminalSurface;
+
+pub struct SftpPanel {
+    pub open: bool,
+    pub backend: Option<SftpBackend>,
+    pub path: String,
+    pub entries: Vec<SftpEntry>,
+    pub selected: Option<usize>,
+    pub status: String,
+}
+
+impl Default for SftpPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            backend: None,
+            path: ".".to_string(),
+            entries: Vec::new(),
+            selected: None,
+            status: String::new(),
+        }
+    }
+}
 
 pub struct LocalTab {
     pub title: String,
@@ -20,10 +43,14 @@ pub enum SshState {
 pub struct SshTab {
     pub title: String,
     pub session_id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
     pub surface: TerminalSurface,
     pub backend: SshTerminal,
     pub state: SshState,
     pub just_created: bool,
+    pub sftp: SftpPanel,
 }
 
 pub enum Tab {
@@ -101,20 +128,51 @@ impl Tab {
                     Err(_) => break,
                 }
             },
-            Tab::Ssh(t) => loop {
-                match t.backend.events.try_recv() {
-                    Ok(SshEvent::Connected) => t.state = SshState::Connected,
-                    Ok(SshEvent::Data(bytes)) => t.surface.feed(&bytes),
-                    Ok(SshEvent::Error(msg)) => t.state = SshState::Error(msg),
-                    Ok(SshEvent::Closed) => {
-                        if !matches!(t.state, SshState::Error(_)) {
-                            t.state = SshState::Closed;
+            Tab::Ssh(t) => {
+                loop {
+                    match t.backend.events.try_recv() {
+                        Ok(SshEvent::Connected) => t.state = SshState::Connected,
+                        Ok(SshEvent::Data(bytes)) => t.surface.feed(&bytes),
+                        Ok(SshEvent::Error(msg)) => t.state = SshState::Error(msg),
+                        Ok(SshEvent::Closed) => {
+                            if !matches!(t.state, SshState::Error(_)) {
+                                t.state = SshState::Closed;
+                            }
+                            break;
                         }
-                        break;
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
-            },
+                if let Some(backend) = &t.sftp.backend {
+                    let mut connect_failed = false;
+                    loop {
+                        match backend.events.try_recv() {
+                            Ok(SftpEvent::Listed { path, entries }) => {
+                                t.sftp.path = path;
+                                t.sftp.entries = entries;
+                                t.sftp.selected = None;
+                                t.sftp.status = format!("{} item(s)", t.sftp.entries.len());
+                            }
+                            Ok(SftpEvent::Progress { file, done, error }) => {
+                                t.sftp.status = match (done, error) {
+                                    (true, _) => format!("{file}: done"),
+                                    (false, Some(e)) => format!("{file}: failed — {e}"),
+                                    (false, None) => format!("{file}: failed"),
+                                };
+                            }
+                            Ok(SftpEvent::Error(msg)) => t.sftp.status = format!("Error: {msg}"),
+                            Ok(SftpEvent::ConnectError(msg)) => {
+                                t.sftp.status = format!("Connect failed: {msg}");
+                                connect_failed = true;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if connect_failed {
+                        t.sftp.backend = None;
+                    }
+                }
+            }
         }
     }
 
@@ -136,6 +194,13 @@ impl Tab {
         match self {
             Tab::Local(t) => t.backend.resize(cols, rows),
             Tab::Ssh(t) => t.backend.resize(cols, rows),
+        }
+    }
+
+    pub fn as_ssh_mut(&mut self) -> Option<&mut SshTab> {
+        match self {
+            Tab::Ssh(t) => Some(t),
+            Tab::Local(_) => None,
         }
     }
 
