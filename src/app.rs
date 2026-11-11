@@ -2,7 +2,7 @@ use crate::backend::local::LocalTerminal;
 use crate::backend::sftp::{Protocol, SftpBackend};
 use crate::backend::ssh::{SshConfig, SshTerminal};
 use crate::backend::tftp;
-use crate::config::{Appearance, Session, Store};
+use crate::config::{Appearance, QuickCommand, Session, Store};
 use crate::tabs::{LocalTab, SftpPanel, SshState, SshTab, Tab, TftpPanel, TftpResult};
 use crate::term::theme::Palette;
 use crate::term::{render, TerminalSurface};
@@ -146,11 +146,45 @@ struct MkdirDraft {
     name: String,
 }
 
+struct QuickCommandDraft {
+    editing_id: Option<String>,
+    name: String,
+    command: String,
+    run_enter: bool,
+}
+
+impl QuickCommandDraft {
+    fn new() -> Self {
+        Self {
+            editing_id: None,
+            name: String::new(),
+            command: String::new(),
+            run_enter: true,
+        }
+    }
+
+    fn from_command(c: &QuickCommand) -> Self {
+        Self {
+            editing_id: Some(c.id.clone()),
+            name: c.name.clone(),
+            command: c.command.clone(),
+            run_enter: c.run_enter,
+        }
+    }
+}
+
+struct ConfirmDeleteCommand {
+    id: String,
+    name: String,
+}
+
 pub struct DTerminalApp {
     store: Store,
     sessions: Vec<Session>,
     appearance: Appearance,
     palette: Palette,
+    quick_commands: Vec<QuickCommand>,
+    cmd_panel_open: bool,
 
     tabs: Vec<Tab>,
     active_tab: Option<usize>,
@@ -161,6 +195,8 @@ pub struct DTerminalApp {
     confirm_delete: Option<ConfirmDeleteSession>,
     confirm_delete_sftp: Option<ConfirmDeleteSftpEntry>,
     mkdir_modal: Option<MkdirDraft>,
+    cmd_modal: Option<QuickCommandDraft>,
+    confirm_delete_cmd: Option<ConfirmDeleteCommand>,
 }
 
 impl Default for DTerminalApp {
@@ -169,11 +205,14 @@ impl Default for DTerminalApp {
         let sessions = store.list_sessions();
         let appearance = store.appearance();
         let palette = Palette::by_name(&appearance.theme);
+        let quick_commands = store.quick_commands();
         Self {
             store,
             sessions,
             appearance,
             palette,
+            quick_commands,
+            cmd_panel_open: false,
             tabs: Vec::new(),
             active_tab: None,
             tab_seq: 0,
@@ -182,6 +221,8 @@ impl Default for DTerminalApp {
             confirm_delete: None,
             confirm_delete_sftp: None,
             mkdir_modal: None,
+            cmd_modal: None,
+            confirm_delete_cmd: None,
         }
     }
 }
@@ -733,6 +774,98 @@ impl DTerminalApp {
             self.confirm_delete = None;
         }
     }
+
+    fn send_quick_command(&mut self, idx: usize) {
+        let Some(cmd) = self.quick_commands.get(idx) else {
+            return;
+        };
+        let Some(i) = self.active_tab else {
+            return;
+        };
+        let text = if cmd.run_enter {
+            let mut t = cmd.command.trim_end_matches('\n').to_string();
+            t.push('\r');
+            t
+        } else {
+            cmd.command.clone()
+        };
+        self.tabs[i].write(text.as_bytes());
+    }
+
+    fn cmd_modal_ui(&mut self, ctx: &egui::Context) {
+        let Some(draft) = &mut self.cmd_modal else {
+            return;
+        };
+        let is_new = draft.editing_id.is_none();
+        let mut close = false;
+        let mut save = false;
+
+        egui::Modal::new(egui::Id::unique("cmd_modal")).show(ctx, |ui| {
+            ui.set_min_width(340.0);
+            ui.heading(if is_new { "New Command" } else { "Edit Command" });
+            ui.separator();
+            ui.label("Name");
+            ui.text_edit_singleline(&mut draft.name);
+            ui.label("Command");
+            ui.add(egui::TextEdit::multiline(&mut draft.command).desired_rows(4));
+            ui.checkbox(&mut draft.run_enter, "Press Enter after sending");
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                let can_save = !draft.name.trim().is_empty() && !draft.command.is_empty();
+                if ui.add_enabled(can_save, egui::Button::new("Save")).clicked() {
+                    save = true;
+                }
+            });
+        });
+
+        if save {
+            if let Some(draft) = self.cmd_modal.take() {
+                let cmd = QuickCommand {
+                    id: draft.editing_id.unwrap_or_default(),
+                    name: draft.name,
+                    command: draft.command,
+                    run_enter: draft.run_enter,
+                };
+                self.store.save_quick_command(cmd);
+                self.quick_commands = self.store.quick_commands();
+            }
+        } else if close {
+            self.cmd_modal = None;
+        }
+    }
+
+    fn confirm_delete_cmd_ui(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.confirm_delete_cmd else {
+            return;
+        };
+        let mut delete = false;
+        let mut cancel = false;
+
+        egui::Modal::new(egui::Id::unique("confirm_delete_cmd")).show(ctx, |ui| {
+            ui.set_min_width(280.0);
+            ui.label(format!("Delete command \"{}\"?", pending.name));
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                if ui.button("Delete").clicked() {
+                    delete = true;
+                }
+            });
+        });
+
+        if delete {
+            if let Some(pending) = self.confirm_delete_cmd.take() {
+                self.store.delete_quick_command(&pending.id);
+                self.quick_commands = self.store.quick_commands();
+            }
+        } else if cancel {
+            self.confirm_delete_cmd = None;
+        }
+    }
 }
 
 enum SftpAction {
@@ -880,6 +1013,11 @@ impl eframe::App for DTerminalApp {
                         }
                     });
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.selectable_label(self.cmd_panel_open, "⌘ Commands").clicked() {
+                        self.cmd_panel_open = !self.cmd_panel_open;
+                    }
+                });
             });
         });
 
@@ -1082,6 +1220,59 @@ impl eframe::App for DTerminalApp {
             self.start_tftp_download(i);
         }
 
+        if self.cmd_panel_open {
+            let mut edit_cmd: Option<usize> = None;
+            let mut delete_cmd: Option<usize> = None;
+            let mut send_cmd: Option<usize> = None;
+            egui::Panel::right("cmd_panel")
+                .resizable(true)
+                .default_size(260.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("Quick Commands");
+                        if ui.small_button("+").clicked() {
+                            self.cmd_modal = Some(QuickCommandDraft::new());
+                        }
+                    });
+                    ui.separator();
+                    if self.quick_commands.is_empty() {
+                        ui.label("No quick commands yet. Click + to add one.");
+                    }
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for (idx, cmd) in self.quick_commands.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let preview = cmd.command.lines().next().unwrap_or("");
+                                if ui
+                                    .add(egui::Label::new(format!("{}\n{preview}", cmd.name)).sense(egui::Sense::click()))
+                                    .on_hover_text(&cmd.command)
+                                    .clicked()
+                                {
+                                    send_cmd = Some(idx);
+                                }
+                                if ui.small_button("✎").clicked() {
+                                    edit_cmd = Some(idx);
+                                }
+                                if ui.small_button("🗑").clicked() {
+                                    delete_cmd = Some(idx);
+                                }
+                            });
+                        }
+                    });
+                });
+            if let Some(idx) = send_cmd {
+                self.send_quick_command(idx);
+            }
+            if let Some(idx) = edit_cmd {
+                self.cmd_modal = Some(QuickCommandDraft::from_command(&self.quick_commands[idx]));
+            }
+            if let Some(idx) = delete_cmd {
+                self.confirm_delete_cmd = Some(ConfirmDeleteCommand {
+                    id: self.quick_commands[idx].id.clone(),
+                    name: self.quick_commands[idx].name.clone(),
+                });
+            }
+        }
+
         let mut reconnect_requested: Option<usize> = None;
         egui::CentralPanel::default().show(ui, |ui| {
             let Some(i) = self.active_tab else {
@@ -1136,6 +1327,8 @@ impl eframe::App for DTerminalApp {
         self.confirm_delete_ui(&ctx);
         self.mkdir_modal_ui(&ctx);
         self.confirm_delete_sftp_ui(&ctx);
+        self.cmd_modal_ui(&ctx);
+        self.confirm_delete_cmd_ui(&ctx);
 
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
